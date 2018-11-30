@@ -18,7 +18,7 @@ while (<RESULTS>) {
     $verdicts{$test} = $verdict eq 'pass';
 }
 close RESULTS;
-
+print "Fetch '$verdicts' \n";
 my (@failures);
 my (@overall, @rubrics, @summary);
 my ($pct_actual, $pct_possible) = (0, 0);
