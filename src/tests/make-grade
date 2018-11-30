@@ -8,13 +8,9 @@ my ($src_dir, $results_file, $grading_file) = @ARGV;
 
 # Read pass/file verdicts from $results_file.
 open (RESULTS, '<', $results_file) || die "$results_file: open: $!\n";
-
 my (%verdicts, %verdict_counts);
-
 while (<RESULTS>) {
-    
     my ($verdict, $test) = /^(pass|FAIL) (.*)$/ or die;
-	
     $verdicts{$test} = $verdict eq 'pass';
 }
 close RESULTS;
