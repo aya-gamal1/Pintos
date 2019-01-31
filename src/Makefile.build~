@@ -60,9 +60,9 @@ userprog_SRC += userprog/exception.c	# User exception handler.
 userprog_SRC += userprog/syscall.c	# System call handler.
 userprog_SRC += userprog/gdt.c		# GDT initialization.
 userprog_SRC += userprog/tss.c		# TSS management.
-userprog_SRC += userprog/sysrout.c	# System routines Implementation.
-userprog_SRC += userprog/usrstack.c	# Stack controls.
-userprog_SRC += userprog/usrmem.c	# User memory access.
+#userprog_SRC += userprog/sysrout.c	# System routines Implementation.
+#userprog_SRC += userprog/usrstack.c	# Stack controls.
+#userprog_SRC += userprog/usrmem.c	# User memory access.
 
 # Virtual memory code
 vm_SRC = vm/frame.c			# Frames (physical memory)
@@ -79,6 +79,7 @@ filesys_SRC += filesys/file.c		# Files.
 filesys_SRC += filesys/directory.c	# Directories.
 filesys_SRC += filesys/inode.c		# File headers.
 filesys_SRC += filesys/fsutil.c		# Utilities.
+filesys_SRC += filesys/cache.c          # Buffer cache.
 
 SOURCES = $(foreach dir,$(KERNEL_SUBDIRS),$($(dir)_SRC))
 OBJECTS = $(patsubst %.c,%.o,$(patsubst %.S,%.o,$(SOURCES)))

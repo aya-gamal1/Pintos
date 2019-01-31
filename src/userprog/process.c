@@ -19,8 +19,6 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "userprog/syscall.h"
-#include "vm/frame.h"
-#include "vm/page.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp,
@@ -33,7 +31,7 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp,
 tid_t
 process_execute (const char *file_name) 
 {
-  char *fn_copy, *parsed_fn;
+  char *fn_copy;
   tid_t tid;
 
   /* Make a copy of FILE_NAME.
@@ -44,19 +42,14 @@ process_execute (const char *file_name)
   strlcpy (fn_copy, file_name, PGSIZE);
 
   // Get parsed file name
-  parsed_fn = palloc_get_page (0);
-  if (parsed_fn == NULL)
-    return TID_ERROR;
-  strlcpy (parsed_fn, file_name, PGSIZE);
-
   char *save_ptr;
-  parsed_fn = strtok_r((char *) parsed_fn, " ", &save_ptr);
+  file_name = strtok_r((char *) file_name, " ", &save_ptr);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (parsed_fn, PRI_DEFAULT, start_process, fn_copy);
-  palloc_free_page(parsed_fn);
+  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy);
+
   return tid;
 }
 
@@ -73,9 +66,6 @@ start_process (void *file_name_)
   char *save_ptr;
   file_name = strtok_r(file_name, " ", &save_ptr);
 
-  // Initialize page table
-  page_table_init(&thread_current()->spt);
-
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
@@ -89,6 +79,10 @@ start_process (void *file_name_)
   else
     {
       thread_current()->cp->load = LOAD_FAIL;
+    }
+  if (!thread_current()->cwd)
+    {
+      thread_current()->cwd = dir_open_root();
     }
   sema_up(&thread_current()->cp->load_sema);
 
@@ -145,16 +139,19 @@ process_exit (void)
   uint32_t *pd;
 
   // Close all files opened by process
-  lock_acquire(&filesys_lock);
   process_close_file(CLOSE_ALL);
   if (cur->executable)
     {
       file_close(cur->executable);
     }
-  lock_release(&filesys_lock);
 
   // Free child list
   remove_child_processes();
+
+  if (thread_current()->cwd)
+    {
+      dir_close(thread_current()->cwd);
+    }
 
   // Set exit value to true in case killed by the kernel
   if (thread_alive(cur->parent) && cur->cp && cur->executable)
@@ -162,9 +159,6 @@ process_exit (void)
       cur->cp->exit = true;
       sema_up(&cur->cp->exit_sema);
     }
-
-  process_remove_mmap(CLOSE_ALL);
-  page_table_destroy(&cur->spt);
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -296,7 +290,6 @@ load (const char *file_name, void (**eip) (void), void **esp,
   process_activate ();
 
   /* Open executable file. */
-  lock_acquire(&filesys_lock);
   file = filesys_open (file_name);
   if (file == NULL) 
     {
@@ -389,11 +382,12 @@ load (const char *file_name, void (**eip) (void), void **esp,
 
  done:
   /* We arrive here whether the load is successful or not. */
-  lock_release(&filesys_lock);
   return success;
 }
 
 /* load() helpers. */
+
+static bool install_page (void *upage, void *kpage, bool writable);
 
 /* Checks whether PHDR describes a valid, loadable segment in
    FILE and returns true if so, false otherwise. */
@@ -467,16 +461,29 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
       size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-      if (!add_file_to_page_table(file, ofs, upage, page_read_bytes,
-				  page_zero_bytes, writable))
-	{
-	  return false;
-	}
+      /* Get a page of memory. */
+      uint8_t *kpage = palloc_get_page (PAL_USER);
+      if (kpage == NULL)
+        return false;
+
+      /* Load this page. */
+      if (file_read (file, kpage, page_read_bytes) != (int) page_read_bytes)
+        {
+          palloc_free_page (kpage);
+          return false; 
+        }
+      memset (kpage + page_read_bytes, 0, page_zero_bytes);
+
+      /* Add the page to the process's address space. */
+      if (!install_page (upage, kpage, writable)) 
+        {
+          palloc_free_page (kpage);
+          return false; 
+        }
 
       /* Advance. */
       read_bytes -= page_read_bytes;
       zero_bytes -= page_zero_bytes;
-      ofs += page_read_bytes;
       upage += PGSIZE;
     }
   return true;
@@ -487,11 +494,20 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 static bool
 setup_stack (void **esp, const char* file_name, char** save_ptr) 
 {
-  bool success = grow_stack(((uint8_t *) PHYS_BASE) - PGSIZE);
+  uint8_t *kpage;
+  bool success = false;
+
+  kpage = palloc_get_page (PAL_USER | PAL_ZERO);
+  if (!kpage)
+    {
+      return success;
+    }
+  success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
   if (success)
     *esp = PHYS_BASE;
   else
     {
+      palloc_free_page (kpage);
       return success;
     }
 
@@ -561,7 +577,8 @@ setup_stack (void **esp, const char* file_name, char** save_ptr)
    with palloc_get_page().
    Returns true on success, false if UPAGE is already mapped or
    if memory allocation fails. */
-bool install_page (void *upage, void *kpage, bool writable)
+static bool
+install_page (void *upage, void *kpage, bool writable)
 {
   struct thread *t = thread_current ();
 
@@ -572,6 +589,21 @@ bool install_page (void *upage, void *kpage, bool writable)
 }
 
 
+int process_add_dir (struct dir *d)
+{
+  struct process_file *pf = malloc(sizeof(struct process_file));
+  if (!pf)
+    {
+      return ERROR;
+    }
+  pf->dir = d;
+  pf->isdir = true;
+  pf->fd = thread_current()->fd;
+  thread_current()->fd++;
+  list_push_back(&thread_current()->file_list, &pf->elem);
+  return pf->fd;
+}
+
 int process_add_file (struct file *f)
 {
   struct process_file *pf = malloc(sizeof(struct process_file));
@@ -580,13 +612,14 @@ int process_add_file (struct file *f)
       return ERROR;
     }
   pf->file = f;
+  pf->isdir = false;
   pf->fd = thread_current()->fd;
   thread_current()->fd++;
   list_push_back(&thread_current()->file_list, &pf->elem);
   return pf->fd;
 }
 
-struct file* process_get_file (int fd)
+struct process_file* process_get_file (int fd)
 {
   struct thread *t = thread_current();
   struct list_elem *e;
@@ -597,7 +630,7 @@ struct file* process_get_file (int fd)
           struct process_file *pf = list_entry (e, struct process_file, elem);
           if (fd == pf->fd)
 	    {
-	      return pf->file;
+	      return pf;
 	    }
         }
   return NULL;
@@ -614,7 +647,14 @@ void process_close_file (int fd)
       struct process_file *pf = list_entry (e, struct process_file, elem);
       if (fd == pf->fd || fd == CLOSE_ALL)
 	{
-	  file_close(pf->file);
+	  if (pf->isdir)
+	    {
+	      dir_close(pf->dir);
+	    }
+	  else
+	    {
+	      file_close(pf->file);
+	    }
 	  list_remove(&pf->elem);
 	  free(pf);
 	  if (fd != CLOSE_ALL)
@@ -623,73 +663,5 @@ void process_close_file (int fd)
 	    }
 	}
       e = next;
-    }
-}
-
-bool process_add_mmap (struct sup_page_entry *spte)
-{
-  struct mmap_file *mm = malloc(sizeof(struct mmap_file));
-  if (!mm)
-    {
-      return false;
-    }
-  mm->spte = spte;
-  mm->mapid = thread_current()->mapid;
-  list_push_back(&thread_current()->mmap_list, &mm->elem);
-  return true;
-}
-
-void process_remove_mmap (int mapping)
-{
-  struct thread *t = thread_current();
-  struct list_elem *next, *e = list_begin(&t->mmap_list);
-  struct file *f = NULL;
-  int close = 0;
-
-  while (e != list_end (&t->mmap_list))
-    {
-      next = list_next(e);
-      struct mmap_file *mm = list_entry (e, struct mmap_file, elem);
-      if (mm->mapid == mapping || mapping == CLOSE_ALL)
-	{
-	  mm->spte->pinned = true;
-	  if (mm->spte->is_loaded)
-	    {
-	      if (pagedir_is_dirty(t->pagedir, mm->spte->uva))
-		{
-		  lock_acquire(&filesys_lock);
-		  file_write_at(mm->spte->file, mm->spte->uva,
-				mm->spte->read_bytes, mm->spte->offset);
-		  lock_release(&filesys_lock);
-		}
-	      frame_free(pagedir_get_page(t->pagedir, mm->spte->uva));
-	      pagedir_clear_page(t->pagedir, mm->spte->uva);
-	    }
-	  if (mm->spte->type != HASH_ERROR)
-	    {
-	      hash_delete(&t->spt, &mm->spte->elem);
-	    }
-	  list_remove(&mm->elem);
-	  if (mm->mapid != close)
-	    {
-	      if (f)
-		{
-		  lock_acquire(&filesys_lock);
-		  file_close(f);
-		  lock_release(&filesys_lock);
-		}
-	      close = mm->mapid;
-	      f = mm->spte->file;
-	    }
-	  free(mm->spte);
-	  free(mm);
-	}
-      e = next;
-    }
-  if (f)
-    {
-      lock_acquire(&filesys_lock);
-      file_close(f);
-      lock_release(&filesys_lock);
     }
 }

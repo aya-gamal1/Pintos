@@ -24,6 +24,7 @@ fsutil_ls (char **argv UNUSED)
     PANIC ("root dir open failed");
   while (dir_readdir (dir, name))
     printf ("%s\n", name);
+  dir_close (dir);
   printf ("End of listing.\n");
 }
 
@@ -117,7 +118,7 @@ fsutil_extract (char **argv UNUSED)
           printf ("Putting '%s' into the file system...\n", file_name);
 
           /* Create destination file. */
-          if (!filesys_create (file_name, size, false))
+          if (!filesys_create (file_name, size))
             PANIC ("%s: create failed", file_name);
           dst = filesys_open (file_name);
           if (dst == NULL)
@@ -156,6 +157,7 @@ fsutil_extract (char **argv UNUSED)
 
 /* Copies file FILE_NAME from the file system to the scratch
    device, in ustar format.
+
    The first call to this function will write starting at the
    beginning of the scratch device.  Later calls advance across
    the device.  This position is independent of that used for

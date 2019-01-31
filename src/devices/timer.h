@@ -3,16 +3,9 @@
 
 #include <round.h>
 #include <stdint.h>
-#include <list.h>
+
 /* Number of timer interrupts per second. */
 #define TIMER_FREQ 100
-
-
-struct timer_elem {
-	struct list_elem elem;
-	struct thread * thread;
-	int64_t ticks_remaining;
-};
 
 void timer_init (void);
 void timer_calibrate (void);

@@ -4,6 +4,8 @@
 #include <user/syscall.h>
 #include "devices/input.h"
 #include "devices/shutdown.h"
+#include "filesys/directory.h"
+#include "filesys/inode.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
 #include "threads/interrupt.h"
@@ -13,26 +15,20 @@
 #include "threads/vaddr.h"
 #include "userprog/pagedir.h"
 #include "userprog/process.h"
-#include "vm/frame.h"
-#include "vm/page.h"
 
 #define MAX_ARGS 3
+#define USER_VADDR_BOTTOM ((void *) 0x08048000)
 
 static void syscall_handler (struct intr_frame *);
+int user_to_kernel_ptr(const void *vaddr);
 void get_arg (struct intr_frame *f, int *arg, int n);
-struct sup_page_entry* check_valid_ptr (const void *vaddr, void* esp);
-void check_valid_buffer (void* buffer, unsigned size, void* esp,
-			 bool to_write);
-void check_valid_string (const void* str, void* esp);
-void check_write_permission (struct sup_page_entry *spte);
-void unpin_ptr (void* vaddr);
-void unpin_string (void* str);
-void unpin_buffer (void* buffer, unsigned size);
+void check_valid_ptr (const void *vaddr);
+void check_valid_buffer (void* buffer, unsigned size);
+void check_valid_string (const void* str);
 
 void
 syscall_init (void) 
 {
-  lock_init(&filesys_lock);
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 
@@ -40,8 +36,8 @@ static void
 syscall_handler (struct intr_frame *f UNUSED) 
 {
   int arg[MAX_ARGS];
-  check_valid_ptr((const void*) f->esp, f->esp);
-  switch (* (int *) f->esp)
+  int esp = user_to_kernel_ptr((const void*) f->esp);
+  switch (* (int *) esp)
     {
     case SYS_HALT:
       {
@@ -57,9 +53,9 @@ syscall_handler (struct intr_frame *f UNUSED)
     case SYS_EXEC:
       {
 	get_arg(f, &arg[0], 1);
-	check_valid_string((const void *) arg[0], f->esp);
-	f->eax = exec((const char *) arg[0]);
-	unpin_string((void *) arg[0]);
+	check_valid_string((const void *) arg[0]);
+	arg[0] = user_to_kernel_ptr((const void *) arg[0]);
+	f->eax = exec((const char *) arg[0]); 
 	break;
       }
     case SYS_WAIT:
@@ -71,24 +67,25 @@ syscall_handler (struct intr_frame *f UNUSED)
     case SYS_CREATE:
       {
 	get_arg(f, &arg[0], 2);
-	check_valid_string((const void *) arg[0], f->esp);
+	check_valid_string((const void *) arg[0]);
+	arg[0] = user_to_kernel_ptr((const void *) arg[0]);
 	f->eax = create((const char *)arg[0], (unsigned) arg[1]);
-	unpin_string((void *) arg[0]);
 	break;
       }
     case SYS_REMOVE:
       {
 	get_arg(f, &arg[0], 1);
-	check_valid_string((const void *) arg[0], f->esp);
+	check_valid_string((const void *) arg[0]);
+	arg[0] = user_to_kernel_ptr((const void *) arg[0]);
 	f->eax = remove((const char *) arg[0]);
 	break;
       }
     case SYS_OPEN:
       {
 	get_arg(f, &arg[0], 1);
-	check_valid_string((const void *) arg[0], f->esp);
+	check_valid_string((const void *) arg[0]);
+	arg[0] = user_to_kernel_ptr((const void *) arg[0]);
 	f->eax = open((const char *) arg[0]);
-	unpin_string((void *) arg[0]);
 	break; 		
       }
     case SYS_FILESIZE:
@@ -100,20 +97,18 @@ syscall_handler (struct intr_frame *f UNUSED)
     case SYS_READ:
       {
 	get_arg(f, &arg[0], 3);
-	check_valid_buffer((void *) arg[1], (unsigned) arg[2], f->esp,
-			   true);
+	check_valid_buffer((void *) arg[1], (unsigned) arg[2]);
+	arg[1] = user_to_kernel_ptr((const void *) arg[1]);
 	f->eax = read(arg[0], (void *) arg[1], (unsigned) arg[2]);
-	unpin_buffer((void *) arg[1], (unsigned) arg[2]);
 	break;
       }
     case SYS_WRITE:
       { 
 	get_arg(f, &arg[0], 3);
-	check_valid_buffer((void *) arg[1], (unsigned) arg[2], f->esp,
-			   false);
+	check_valid_buffer((void *) arg[1], (unsigned) arg[2]);
+	arg[1] = user_to_kernel_ptr((const void *) arg[1]);
 	f->eax = write(arg[0], (const void *) arg[1],
 		       (unsigned) arg[2]);
-	unpin_buffer((void *) arg[1], (unsigned) arg[2]);
 	break;
       }
     case SYS_SEEK:
@@ -134,58 +129,100 @@ syscall_handler (struct intr_frame *f UNUSED)
 	close(arg[0]);
 	break;
       }
-    case SYS_MMAP:
-      {
-	get_arg(f, &arg[0], 2);
-	f->eax = mmap(arg[0], (void *) arg[1]);
-	break;
-      }
-    case SYS_MUNMAP:
+    case SYS_CHDIR:
       {
 	get_arg(f, &arg[0], 1);
-	munmap(arg[0]);
+	check_valid_string((const void *) arg[0]);
+	arg[0] = user_to_kernel_ptr((const void *) arg[0]);
+	f->eax = chdir((const char *) arg[0]);
+	break;
+      }
+    case SYS_MKDIR:
+      {
+	get_arg(f, &arg[0], 1);
+	check_valid_string((const void *) arg[0]);
+	arg[0] = user_to_kernel_ptr((const void *) arg[0]);
+	f->eax = mkdir((const char *) arg[0]);
+	break;
+      }
+    case SYS_READDIR:
+      {
+	get_arg(f, &arg[0], 2);
+	check_valid_string((const void *) arg[1]);
+	arg[1] = user_to_kernel_ptr((const void *) arg[1]);
+	f->eax = readdir(arg[0], (char *) arg[1]);
+	break;
+      }
+    case SYS_ISDIR:
+      {
+	get_arg(f, &arg[0], 1);
+	f->eax = isdir(arg[0]);
+	break;
+      }
+    case SYS_INUMBER:
+      {
+	get_arg(f, &arg[0], 1);
+	f->eax = inumber(arg[0]);
 	break;
       }
     }
-  unpin_ptr(f->esp);
 }
 
-int mmap (int fd, void *addr)
+bool chdir (const char* dir)
 {
-  struct file *old_file = process_get_file(fd);
-  if (!old_file || !is_user_vaddr(addr) || addr < USER_VADDR_BOTTOM ||
-      ((uint32_t) addr % PGSIZE) != 0)
+  return filesys_chdir(dir);
+}
+
+bool mkdir (const char* dir)
+{
+  return filesys_create(dir, 0, true);
+}
+
+bool readdir (int fd, char* name)
+{
+  struct process_file *pf = process_get_file(fd);
+  if (!pf)
+    {
+      return false;
+    }
+  if (!pf->isdir)
+    {
+      return false;
+    }
+  if (!dir_readdir(pf->dir, name))
+    {
+      return false;
+    }
+  return true;
+}
+
+bool isdir (int fd)
+{
+  struct process_file *pf = process_get_file(fd);
+  if (!pf)
     {
       return ERROR;
     }
-  struct file *file = file_reopen(old_file);
-  if (!file || file_length(old_file) == 0)
+  return pf->isdir;
+}
+
+int inumber (int fd)
+{
+  struct process_file *pf = process_get_file(fd);
+  if (!pf)
     {
       return ERROR;
     }
-  thread_current()->mapid++;
-  int32_t ofs = 0;
-  uint32_t read_bytes = file_length(file);
-  while (read_bytes > 0)
+  block_sector_t inumber;
+  if (pf->isdir)
     {
-      uint32_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
-      uint32_t page_zero_bytes = PGSIZE - page_read_bytes;
-      if (!add_mmap_to_page_table(file, ofs,
-				  addr, page_read_bytes, page_zero_bytes))
-	{
-	  munmap(thread_current()->mapid);
-	  return ERROR;
-	}
-      read_bytes -= page_read_bytes;
-      ofs += page_read_bytes;
-      addr += PGSIZE;
-  }
-  return thread_current()->mapid;
-}
-
-void munmap (int mapping)
-{
-  process_remove_mmap(mapping);
+      inumber = inode_get_inumber(dir_get_inode(pf->dir));
+    }
+  else
+    {
+      inumber = inode_get_inumber(file_get_inode(pf->file));
+    }
+  return inumber;
 }
 
 void halt (void)
@@ -231,45 +268,45 @@ int wait (pid_t pid)
 
 bool create (const char *file, unsigned initial_size)
 {
-  lock_acquire(&filesys_lock);
-  bool success = filesys_create(file, initial_size);
-  lock_release(&filesys_lock);
-  return success;
+  return filesys_create(file, initial_size, false);
 }
 
 bool remove (const char *file)
 {
-  lock_acquire(&filesys_lock);
-  bool success = filesys_remove(file);
-  lock_release(&filesys_lock);
-  return success;
+  return filesys_remove(file);
 }
 
 int open (const char *file)
 {
-  lock_acquire(&filesys_lock);
   struct file *f = filesys_open(file);
   if (!f)
     {
-      lock_release(&filesys_lock);
       return ERROR;
     }
-  int fd = process_add_file(f);
-  lock_release(&filesys_lock);
+  int fd;
+  if (inode_is_dir(file_get_inode(f)))
+    {
+      fd = process_add_dir((struct dir *) f);
+    }
+  else
+    {
+      fd = process_add_file(f);
+    }
   return fd;
 }
 
 int filesize (int fd)
 {
-  lock_acquire(&filesys_lock);
-  struct file *f = process_get_file(fd);
-  if (!f)
+  struct process_file *pf = process_get_file(fd);
+  if (!pf)
     {
-      lock_release(&filesys_lock);
       return ERROR;
     }
-  int size = file_length(f);
-  lock_release(&filesys_lock);
+  if (pf->isdir)
+    {
+      return ERROR;
+    }
+  int size = file_length(pf->file);
   return size;
 }
 
@@ -285,15 +322,16 @@ int read (int fd, void *buffer, unsigned size)
 	}
       return size;
     }
-  lock_acquire(&filesys_lock);
-  struct file *f = process_get_file(fd);
-  if (!f)
+  struct process_file *pf = process_get_file(fd);
+  if (!pf)
     {
-      lock_release(&filesys_lock);
       return ERROR;
     }
-  int bytes = file_read(f, buffer, size);
-  lock_release(&filesys_lock);
+  if (pf->isdir)
+    {
+      return ERROR;
+    }
+  int bytes = file_read(pf->file, buffer, size);
   return bytes;
 }
 
@@ -304,82 +342,70 @@ int write (int fd, const void *buffer, unsigned size)
       putbuf(buffer, size);
       return size;
     }
-  lock_acquire(&filesys_lock);
-  struct file *f = process_get_file(fd);
-  if (!f)
+  struct process_file *pf = process_get_file(fd);
+  if (!pf)
     {
-      lock_release(&filesys_lock);
       return ERROR;
     }
-  int bytes = file_write(f, buffer, size);
-  lock_release(&filesys_lock);
+  if (pf->isdir)
+    {
+      return ERROR;
+    }
+  int bytes = file_write(pf->file, buffer, size);
   return bytes;
 }
 
 void seek (int fd, unsigned position)
 {
-  lock_acquire(&filesys_lock);
-  struct file *f = process_get_file(fd);
-  if (!f)
+  struct process_file *pf = process_get_file(fd);
+  if (!pf)
     {
-      lock_release(&filesys_lock);
       return;
     }
-  file_seek(f, position);
-  lock_release(&filesys_lock);
+  if (pf->isdir)
+    {
+      return;
+    }
+  file_seek(pf->file, position);
 }
 
 unsigned tell (int fd)
 {
-  lock_acquire(&filesys_lock);
-  struct file *f = process_get_file(fd);
-  if (!f)
+  struct process_file *pf = process_get_file(fd);
+  if (!pf)
     {
-      lock_release(&filesys_lock);
       return ERROR;
     }
-  off_t offset = file_tell(f);
-  lock_release(&filesys_lock);
+  if (pf->isdir)
+    {
+      return ERROR;
+    }
+  off_t offset = file_tell(pf->file);
   return offset;
 }
 
 void close (int fd)
 {
-  lock_acquire(&filesys_lock);
   process_close_file(fd);
-  lock_release(&filesys_lock);
 }
 
-void check_write_permission (struct sup_page_entry *spte)
-{
-  if (!spte->writable)
-    {
-      exit(ERROR);
-    }
-}
-
-struct sup_page_entry* check_valid_ptr(const void *vaddr, void* esp)
+void check_valid_ptr (const void *vaddr)
 {
   if (!is_user_vaddr(vaddr) || vaddr < USER_VADDR_BOTTOM)
     {
       exit(ERROR);
     }
-  bool load = false;
-  struct sup_page_entry *spte = get_spte((void *) vaddr);
-  if (spte)
-    {
-      load_page(spte);
-      load = spte->is_loaded;
-    }
-  else if (vaddr >= esp - STACK_HEURISTIC)
-    {
-      load = grow_stack((void *) vaddr);
-    }
-  if (!load)
+}
+
+int user_to_kernel_ptr(const void *vaddr)
+{
+  check_valid_ptr(vaddr);
+  void *ptr = pagedir_get_page(thread_current()->pagedir, vaddr);
+  if (!ptr)
     {
       exit(ERROR);
     }
-  return spte;
+  return (int) ptr;
 }
 
 struct child_process* add_child_process (int pid)
@@ -446,67 +472,26 @@ void get_arg (struct intr_frame *f, int *arg, int n)
   for (i = 0; i < n; i++)
     {
       ptr = (int *) f->esp + i + 1;
-      check_valid_ptr((const void *) ptr, f->esp);
+      check_valid_ptr((const void *) ptr);
       arg[i] = *ptr;
     }
 }
 
-void check_valid_buffer (void* buffer, unsigned size, void* esp,
-			 bool to_write)
+void check_valid_buffer (void* buffer, unsigned size)
 {
   unsigned i;
   char* local_buffer = (char *) buffer;
   for (i = 0; i < size; i++)
     {
-      struct sup_page_entry *spte = check_valid_ptr((const void*)
-						    local_buffer, esp);
-      if (spte && to_write)
-	{
-	  if (!spte->writable)
-	    {
-	      exit(ERROR);
-	    }
-	}
+      check_valid_ptr((const void*) local_buffer);
       local_buffer++;
     }
 }
 
-void check_valid_string (const void* str, void* esp)
+void check_valid_string (const void* str)
 {
-  check_valid_ptr(str, esp);
-  while (* (char *) str != 0)
+  while (* (char *) user_to_kernel_ptr(str) != 0)
     {
       str = (char *) str + 1;
-      check_valid_ptr(str, esp);
-    }
-}
-
-void unpin_ptr (void* vaddr)
-{
-  struct sup_page_entry *spte = get_spte(vaddr);
-  if (spte)
-    {
-      spte->pinned = false;
-    }
-}
-
-void unpin_string (void* str)
-{
-  unpin_ptr(str);
-  while (* (char *) str != 0)
-    {
-      str = (char *) str + 1;
-      unpin_ptr(str);
-    }
-}
-
-void unpin_buffer (void* buffer, unsigned size)
-{
-  unsigned i;
-  char* local_buffer = (char *) buffer;
-  for (i = 0; i < size; i++)
-    {
-      unpin_ptr(local_buffer);
-      local_buffer++;
     }
 }

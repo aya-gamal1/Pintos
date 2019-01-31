@@ -4,6 +4,7 @@
 #include <random.h>
 #include <stdio.h>
 #include <string.h>
+#include "filesys/directory.h"
 #include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
@@ -15,8 +16,6 @@
 #ifdef USERPROG
 #include "userprog/process.h"
 #include "userprog/syscall.h"
-#include "vm/frame.h"
-#include "vm/swap.h"
 #endif
 
 /* Random value for struct thread's `magic' member.
@@ -96,14 +95,14 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
-
-  frame_table_init();
+  list_init (&sleep_list);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+  initial_thread->cwd = NULL;
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -214,6 +213,14 @@ thread_create (const char *name, int priority,
   t->parent = thread_tid();
   struct child_process *cp = add_child_process(t->tid);
   t->cp = cp;
+  if (thread_current()->cwd)
+    {
+      t->cwd = dir_reopen(thread_current()->cwd);
+    }
+  else
+    {
+      t->cwd = NULL;
+    }
 
   /* Add to run queue. */
   thread_unblock (t);
@@ -483,9 +490,6 @@ init_thread (struct thread *t, const char *name, int priority)
   list_init(&t->file_list);
   t->fd = MIN_FD;
 
-  list_init(&t->mmap_list);
-  t->mapid = 0;
-
   list_init(&t->child_list);
   t->cp = NULL;
   t->parent = NO_PARENT;
@@ -630,4 +634,17 @@ void release_locks (void)
       list_remove(&l->elem);
       e = next;
     }
+}
+
+bool cmp_ticks (const struct list_elem *a,
+		const struct list_elem *b,
+		void *aux UNUSED)
+{
+  struct thread *ta = list_entry(a, struct thread, elem);
+  struct thread *tb = list_entry(b, struct thread, elem);
+  if (ta->ticks < tb->ticks)
+    {
+      return true;
+    }
+  return false;
 }
